@@ -50,9 +50,16 @@ screenlog.*
 repo/
 venv/
 data/
+data
 c3/
 ref/
 nvlib/
+cache/
 
 # pycharm IDE files
 .idea/
+
+# build
+build/
+*.egg-info/
+*.ipynb_checkpoints/

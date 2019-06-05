@@ -84,7 +84,7 @@ def get_inliers(locations_1, descriptors_1, locations_2, descriptors_2):
 
 
 def get_attention_image_byte(att_score):
-    print('attn_score shape: {}'.format(att_score.shape))
+    # print('attn_score shape: {}'.format(att_score.shape))
     attention_np = np.squeeze(att_score, (0, 1)).astype(np.uint8)
 
     im = Image.fromarray(np.dstack((attention_np, attention_np, attention_np)))
@@ -104,10 +104,10 @@ def get_ransac_image_byte(img_1, locations_1, descriptors_1, img_2, locations_2,
     """
 
     # Convert image byte to 3 channel numpy array
-    with Image.open(BytesIO(img_1)) as img:
-        img_1 = load_image_into_numpy_array(img)
-    with Image.open(BytesIO(img_2)) as img:
-        img_2 = load_image_into_numpy_array(img)
+    # with Image.open(BytesIO(img_1)) as img:
+    #     img_1 = load_image_into_numpy_array(img)
+    # with Image.open(BytesIO(img_2)) as img:
+    #     img_2 = load_image_into_numpy_array(img)
 
     inliers, locations_1_to_use, locations_2_to_use = get_inliers(
         locations_1,

@@ -121,6 +121,7 @@ class Delf_V1(nn.Module):
                 exclude = ['layer4', 'avgpool', 'fc']
             if self.target_layer in ['layer4']:
                 exclude = ['avgpool', 'fc']
+        self.exclude = exclude
 
         if self.arch in ['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152']:
             print('[{}] loading {} pretrained ImageNet weights ... It may take few seconds...'
@@ -131,7 +132,10 @@ class Delf_V1(nn.Module):
 
             # endpoint: base
             submodules = []
-            for layer_name in ['conv1', 'bn1', 'relu', 'maxpool', 'layer1', 'layer2', 'layer3']:
+            base_layers = ['conv1', 'bn1', 'relu', 'maxpool', 'layer1', 'layer2', 'layer3']
+            if self.target_layer in ['layer4']:
+                base_layers.append('layer4')
+            for layer_name in base_layers:
                 submodules.append((layer_name, module_state_dict[layer_name]))
             self.__register_module__('base', submodules)
 
@@ -153,6 +157,7 @@ class Delf_V1(nn.Module):
                 submodules = []
                 submodules.append(nn.Conv2d(in_c, ncls, 1))
                 submodules.append(Flatten())
+                # submodules.append(nn.Linear(in_c, ncls))
                 self.__register_module__('logits', submodules)
 
             # load weights.
@@ -175,6 +180,26 @@ class Delf_V1(nn.Module):
                 __load_weights_from__(self.module_dict, load_dict, modulenames=['base','attn','pool'])
                 print('load model from "{}"'.format(load_from))
 
+    def load_weights(self):
+        if self.stage in ['keypoint']:
+            load_dict = torch.load(self.load_from)
+            all_load_param = []
+            for key in load_dict["state_dict"]:
+                # if key.startswith("module."):
+                #     m_key = key[7:]
+                # else:
+                #     m_key = key
+                m_key = key
+                if all([not m_key.startswith(ex) for ex in self.exclude]):
+                    all_load_param.append((m_key, load_dict["state_dict"][key]))
+            new_load_dict = {"base": collections.OrderedDict(all_load_param)}
+            __load_weights_from__(self.module_dict, new_load_dict, modulenames=['base'])
+            __freeze_weights__(self.module_dict, freeze=['base'])
+            print('load model from "{}"'.format(self.load_from))
+        elif self.stage in ['inference']:
+            load_dict = torch.load(self.load_from)
+            __load_weights_from__(self.module_dict, load_dict, modulenames=['base','attn','pool'])
+            print('load model from "{}"'.format(self.load_from))
 
     def __register_module__(self, modulename, module):
         if isinstance(module, list) or isinstance(module, tuple):
@@ -205,6 +230,9 @@ class Delf_V1(nn.Module):
         x = module(x)
         self.end_points[modulename] = x
         return x
+
+    def forward_without_save(self, x, modulename):
+        return self.module_dict[modulename](x)
 
     def __forward_and_save_feature__(self, x, model, name):
         x = model(x)
@@ -268,16 +296,16 @@ class Delf_V1(nn.Module):
         elif self.stage in ['keypoint']:
             if self.use_random_gamma_rescale:
                 x = self.__gamma_rescale__(x)
-            x = self.__forward_and_save__(x, 'base')
-            if self.target_layer in ['layer4']:
-                x = self.__forward_and_save__(x, 'layer4')
+            x = self.forward_without_save(x, 'base')
+            # if self.target_layer in ['layer4']:
+            #     x = self.forward_without_save(x, 'layer4')
             if self.use_l2_normalized_feature:
                 attn_x = F.normalize(x, p=2, dim=1)
             else:
                 attn_x = x
-            attn_score = self.__forward_and_save__(x, 'attn')
-            x = self.__forward_and_save__([attn_x, attn_score], 'pool')
-            x = self.__forward_and_save__(x, 'logits')
+            attn_score = self.forward_without_save(x, 'attn')
+            x = self.forward_without_save([attn_x, attn_score], 'pool')
+            x = self.forward_without_save(x, 'logits')
 
         elif self.stage in ['inference']:
             x = self.__forward_and_save__(x, 'base')

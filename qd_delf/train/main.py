@@ -80,7 +80,11 @@ def main(config):
         target_layer = config.target_layer,
         use_random_gamma_rescale = config.use_random_gamma_rescale)
 
-    # model = torch.nn.DataParallel(model, device_ids=[0,1,2,3]).cuda()
+    # device = torch.device("cuda")
+    # model.to(device)
+    # model = torch.nn.DataParallel(model).cuda()
+    # model.load_weights()
+    # import ipdb; ipdb.set_trace()
 
     # solver
     from solver import Solver

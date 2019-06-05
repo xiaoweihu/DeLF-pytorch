@@ -128,7 +128,7 @@ parser.add_argument('--ncls',
 parser.add_argument('--arch',
                     metavar='ARCH',
                     default='resnet50',
-                    choices=['resnet50, resnet101, resnet152'],
+                    choices=['resnet18, resnet50, resnet101, resnet152'],
                     help='only support resnet50 at the moment.')
 parser.add_argument('--print-freq', '-p', default=100, type=int,
                     help='print frequency (default: 100)')

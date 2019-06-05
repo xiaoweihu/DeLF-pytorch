@@ -62,13 +62,13 @@ class MultiFixedScheduler(optim.lr_scheduler.MultiStepLR):
         if idx >= len(self.lrs):
             idx = len(self.lrs) - 1
         lr = self.lrs[idx]
-        return lr
+        return [lr]
 
     def step(self, iterations=None):
         if iterations is None:
             iterations = self.last_epoch + 1
         self.last_epoch = iterations
-        new_lr = self.get_lr()
+        new_lr = self.get_lr()[0]
         if self.last_lr == new_lr:
             return
         # logging.info("Iteration {}, lr = {}".format(iterations, new_lr))
@@ -82,7 +82,7 @@ class Solver(object):
         self.config = config
         self.epoch = 0          # global epoch.
         self.best_acc = 0       # global best accuracy.
-        self.prefix = os.path.join('repo', config.expr)
+        self.prefix = os.path.join('output', config.expr)
 
         # ship model to cuda
         self.model = __cuda__(model)
@@ -233,7 +233,7 @@ class Solver(object):
                                 epoch=self.epoch+1,
                                 batch=batch_idx+1,
                                 size=len(dataloader),
-                                lr=self.lr_scheduler.get_lr().item(),
+                                lr=self.lr_scheduler.get_lr()[0],
                                 loss=prec_losses.avg,
                                 top1=prec_top1.avg,
                                 top3=prec_top3.avg,
@@ -247,7 +247,7 @@ class Solver(object):
 
         # write to logger
         self.logger[mode].append([self.epoch+1,
-                                  self.lr_scheduler.get_lr().item(),
+                                  self.lr_scheduler.get_lr()[0],
                                   prec_losses.avg,
                                   prec_top1.avg,
                                   prec_top3.avg,

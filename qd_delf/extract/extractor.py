@@ -46,21 +46,21 @@ def __to_var__(x, volatile=False):
 def __to_tensor__(x):
     return x.data
 
-def __build_delf_config__(data):
-    parser = argparse.ArgumentParser('delf-config')
-    parser.add_argument('--stage', type=str, default='inference')
-    parser.add_argument('--expr', type=str, default='dummy')
-    parser.add_argument('--ncls', type=str, default='dummy')
-    parser.add_argument('--use_random_gamma_rescale', type=str, default=False)
-    parser.add_argument('--arch', type=str, default=data['ARCH'])
-    parser.add_argument('--load_from', type=str, default=data['LOAD_FROM'])
-    parser.add_argument('--target_layer', type=str, default=data['TARGET_LAYER'])
-    delf_config, _ = parser.parse_known_args()
+# def __build_delf_config__(data):
+#     parser = argparse.ArgumentParser('delf-config')
+#     parser.add_argument('--stage', type=str, default='inference')
+#     parser.add_argument('--expr', type=str, default='dummy')
+#     parser.add_argument('--ncls', type=str, default='dummy')
+#     parser.add_argument('--use_random_gamma_rescale', type=str, default=False)
+#     parser.add_argument('--arch', type=str, default=data['ARCH'])
+#     parser.add_argument('--load_from', type=str, default=data['LOAD_FROM'])
+#     parser.add_argument('--target_layer', type=str, default=data['TARGET_LAYER'])
+#     delf_config, _ = parser.parse_known_args()
 
-    # print config.
-    state = {k: v for k, v in delf_config._get_kwargs()}
-    print(state)
-    return delf_config
+#     # print config.
+#     state = {k: v for k, v in delf_config._get_kwargs()}
+#     print(state)
+#     return delf_config
 
 
 class FeatureExtractor():
@@ -68,7 +68,7 @@ class FeatureExtractor():
                  extractor_config):
 
         # environment setting.
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(extractor_config.get('GPU_ID'))
+        # os.environ['CUDA_VISIBLE_DEVICES'] = str(extractor_config.get('GPU_ID'))
 
         # parameters.
         self.title = 'DeLF-Inference'
@@ -86,13 +86,13 @@ class FeatureExtractor():
 
         # load pytorch model
         print('load DeLF pytorch model...')
-        delf_config = __build_delf_config__(extractor_config)
+        # delf_config = __build_delf_config__(extractor_config)
         self.model = Delf_V1(
-            ncls = delf_config.ncls,
-            load_from = delf_config.load_from,
-            arch = delf_config.arch,
-            stage = delf_config.stage,
-            target_layer = delf_config.target_layer,
+            ncls = 'dummy',
+            load_from = extractor_config['LOAD_FROM'],
+            arch = extractor_config['ARCH'],
+            stage = 'inference',
+            target_layer = extractor_config['TARGET_LAYER'],
             use_random_gamma_rescale = False)
         self.model.eval()
         self.model = __cuda__(self.model)
@@ -386,30 +386,27 @@ class FeatureExtractor():
             self.__save_delf_features_to_file__(feature_maps, output_path)
 
 
-def main(MODE, model_name, input_path, output_path):
+def main(MODE, model_name, arch, target_layer, input_path, output_path):
     # MODE = 'delf'           # either "delf" or "pca"
     # MODE = 'pca'
-    GPU_ID = 7
+    # GPU_ID = 0
     IOU_THRES = 0.98
     ATTN_THRES = 0.17
     TOP_K = 1000
     USE_PCA = True
     PCA_DIMS = 40
     SCALE_LIST = [0.25, 0.3535, 0.5, 0.7071, 1.0, 1.4142, 2.0]
-    ARCH = 'resnet50'
-    EXPR = 'dummy'
-    TARGET_LAYER = 'layer3'
 
     # MODEL_NAME = 'ldmk'
 
-    LOAD_FROM = 'repo/{}/keypoint/ckpt/fix.pth.tar'.format(model_name)
-    PCA_PARAMETERS_PATH = 'repo/{}/pca.h5'.format(model_name)
+    LOAD_FROM = 'output/{}/keypoint/ckpt/fix.pth.tar'.format(model_name)
+    PCA_PARAMETERS_PATH = 'output/{}/pca.h5'.format(model_name)
     DATASET_PATH = "data/brand_output/configs/train_nobg.yamllst"
 
     extractor_config = {
         # params for feature extraction.
         'MODE': MODE,
-        'GPU_ID': GPU_ID,
+        # 'GPU_ID': GPU_ID,
         'IOU_THRES': IOU_THRES,
         'ATTN_THRES': ATTN_THRES,
         'TOP_K': TOP_K,
@@ -420,17 +417,15 @@ def main(MODE, model_name, input_path, output_path):
 
         # params for model load.
         'LOAD_FROM': LOAD_FROM,
-        'ARCH': ARCH,
-        'EXPR': EXPR,
-        'TARGET_LAYER': TARGET_LAYER,
+        'ARCH': arch,
+        'EXPR': model_name,
+        'TARGET_LAYER': target_layer,
     }
 
 
     extractor = FeatureExtractor(extractor_config)
     if MODE.lower() in ['pca']:
-        output_path = PCA_PARAMETERS_PATH
-        input_path = DATASET_PATH
-        extractor.extract(input_path, output_path)
+        extractor.extract(DATASET_PATH, PCA_PARAMETERS_PATH)
 
     elif MODE.lower() in ['delf']:
         # query

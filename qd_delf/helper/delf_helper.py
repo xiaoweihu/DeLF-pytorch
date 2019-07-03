@@ -114,7 +114,7 @@ def GetDelfFeatureFromMultiScale(
     iou_thres,
     attn_thres,
     use_pca=False,
-    workers=8):
+    workers=1):
     '''GetDelfFeatureFromMultiScale
     warning: use workers = 1 for serving otherwise out of memory error could occurs.
     (because uwsgi uses multi-threads by itself.)
@@ -138,8 +138,37 @@ def GetDelfFeatureFromMultiScale(
     output_scales = []
     output_original_scale_attn = None
 
-    # scale = scale_list[0]
-    # tmp = GetDelfFeatureFromSingleScale(
+    for scale in scale_list:
+        (selected_boxes, selected_features,
+            selected_scales, selected_scores,
+            selected_original_scale_attn) = \
+                    GetDelfFeatureFromSingleScale(
+                        x,
+                        model,
+                        scale,
+                        pca_mean,
+                        pca_vars,
+                        pca_matrix,
+                        pca_dims,
+                        rf,
+                        stride,
+                        padding,
+                        attn_thres,
+                        use_pca)
+        # append to list.
+        output_boxes.append(selected_boxes) if selected_boxes is not None else output_boxes
+        output_features.append(selected_features) if selected_features is not None else output_features
+        output_scales.append(selected_scales) if selected_scales is not None else output_scales
+        output_scores.append(selected_scores) if selected_scores is not None else output_scores
+        if selected_original_scale_attn is not None:
+            output_original_scale_attn = selected_original_scale_attn
+
+    # multi-threaded feature extraction from different scales.
+    # with ThreadPoolExecutor(max_workers=workers) as pool:
+    #     # assign jobs.
+    #     futures = {
+    #         pool.submit(
+    #             GetDelfFeatureFromSingleScale,
     #                 x,
     #                 model,
     #                 scale,
@@ -151,40 +180,20 @@ def GetDelfFeatureFromMultiScale(
     #                 stride,
     #                 padding,
     #                 attn_thres,
-    #                 use_pca)
-    # import ipdb; ipdb.set_trace()
-
-    # multi-threaded feature extraction from different scales.
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        # assign jobs.
-        futures = {
-            pool.submit(
-                GetDelfFeatureFromSingleScale,
-                    x,
-                    model,
-                    scale,
-                    pca_mean,
-                    pca_vars,
-                    pca_matrix,
-                    pca_dims,
-                    rf,
-                    stride,
-                    padding,
-                    attn_thres,
-                    use_pca):
-            scale for scale in scale_list
-        }
-        for future in as_completed(futures):
-            (selected_boxes, selected_features,
-            selected_scales, selected_scores,
-            selected_original_scale_attn) = future.result()
-            # append to list.
-            output_boxes.append(selected_boxes) if selected_boxes is not None else output_boxes
-            output_features.append(selected_features) if selected_features is not None else output_features
-            output_scales.append(selected_scales) if selected_scales is not None else output_scales
-            output_scores.append(selected_scores) if selected_scores is not None else output_scores
-            if selected_original_scale_attn is not None:
-                output_original_scale_attn = selected_original_scale_attn
+    #                 use_pca):
+    #         scale for scale in scale_list
+    #     }
+    #     for future in as_completed(futures):
+    #         (selected_boxes, selected_features,
+    #         selected_scales, selected_scores,
+    #         selected_original_scale_attn) = future.result()
+    #         # append to list.
+    #         output_boxes.append(selected_boxes) if selected_boxes is not None else output_boxes
+    #         output_features.append(selected_features) if selected_features is not None else output_features
+    #         output_scales.append(selected_scales) if selected_scales is not None else output_scales
+    #         output_scores.append(selected_scores) if selected_scores is not None else output_scores
+    #         if selected_original_scale_attn is not None:
+    #             output_original_scale_attn = selected_original_scale_attn
 
     # if scale == 1.0 is not included in scale list, just show noisy attention image.
     if output_original_scale_attn is None:
@@ -227,7 +236,7 @@ def GetDelfFeatureFromMultiScale(
     torch.cuda.empty_cache()            # it releases all unoccupied cached memory!! (but it makes process slow)
 
     if __DEBUG__:
-        #PrintGpuMemoryStats()
+        PrintGpuMemoryStats()
         PrintResult(data)
     return data
 
@@ -268,7 +277,8 @@ def GetDelfFeatureFromSingleScale(
     new_h = int(round(x.size(2)*scale))
     new_w = int(round(x.size(3)*scale))
     scaled_x = F.interpolate(x, size=(new_h, new_w), mode='bilinear', align_corners=True)
-    scaled_features, scaled_scores = model.forward_for_serving(scaled_x)
+    with torch.no_grad():
+        scaled_features, scaled_scores = model.forward_for_serving(scaled_x)
 
     # save original size attention (used for attention visualization.)
     selected_original_scale_attn = None
@@ -341,8 +351,7 @@ def DelfFeaturePostProcessing(
     Retturn:
         descriptors: (w x h, pca_dims) desciptor Tensor.
     '''
-
-    locations = CalculateKeypointCenters(boxes)
+    # locations = CalculateKeypointCenters(boxes)
 
     # L2 Normalization.
     descriptors = descriptors.squeeze()

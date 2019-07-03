@@ -7,6 +7,7 @@ import os, sys, time
 # sys.path.append('../')
 # sys.path.append('../train')
 import argparse
+import base64
 
 import torch
 import torch.nn
@@ -17,15 +18,20 @@ import torchvision.datasets as datasets
 import numpy as np
 import h5py
 import json
-import cPickle
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
 import copy
 
 from ..helper import delf_helper
 from ..train.delf import Delf_V1
-from ..train.dataset import CropClassTSVDatasetYaml, CropClassTSVDatasetYamlList
-from pca import DelfPCA
+from ..train.dataset import CropClassTSVDatasetYaml
+from .pca import DelfPCA
 # from folder import ImageFolder
 from ..utils import mkdir_p, AverageMeter
+
+from qd.tsv_io import tsv_writer
 
 __DEBUG__ = False
 
@@ -36,9 +42,11 @@ def __cuda__(x):
         return x.cuda()
     else:
         return x
+    # return x
 
 def __is_cuda__():
     return torch.cuda.is_available()
+    # return False
 
 def __to_var__(x, volatile=False):
     return Variable(x, volatile=volatile)
@@ -83,6 +91,7 @@ class FeatureExtractor():
         self.input_path = extractor_config.get('INPUT_PATH')
         self.output_path = extractor_config.get('OUTPUT_PATH')
 
+        self.enlarge_bbox = extractor_config.get('ENLARGE_BBOX')
 
         # load pytorch model
         print('load DeLF pytorch model...')
@@ -158,7 +167,7 @@ class FeatureExtractor():
             pca_vars = 'dummy_pca_vars',
             pca_matrix = 'dummy_pca_matrix',
             pca_dims = 'dummy_pca_dims',
-            workers = 4
+            workers = 1
         else:
             assert mode == 'delf', 'mode must be either pca or delf'
             use_pca = copy.deepcopy(self.use_pca)
@@ -166,7 +175,7 @@ class FeatureExtractor():
             pca_vars = copy.deepcopy(self.pca_vars)
             pca_matrix = copy.deepcopy(self.pca_matrix)
             pca_dims = copy.deepcopy(self.pca_dims)
-            workers = 4
+            workers = 1
         try:
             output = delf_helper.GetDelfFeatureFromMultiScale(
                 x = x,
@@ -214,8 +223,11 @@ class FeatureExtractor():
             }, ... ]
         '''
         with open(filename, 'wb') as handle:
-            cPickle.dump(data, handle, protocol=2)       # use protocol <= 2 for python2 compatibility.
+            pickle.dump(data, handle, protocol=2)       # use protocol <= 2 for python2 compatibility.
         print('\nsaved DeLF feature at {}'.format(filename))
+
+    def delf_features2str(self, data):
+        return base64.b64encode(pickle.dumps(data, protocol=2))
 
 
     def __save_raw_features_to_file__(self,
@@ -244,26 +256,25 @@ class FeatureExtractor():
         assert self.mode.lower() in ['pca', 'delf']
         batch_timer = AverageMeter()
         data_timer = AverageMeter()
-        since = time.time()
 
         # dataloader.
         # dataset = ImageFolder(
         #     root = input_path,
         #     transform = transforms.ToTensor())
+        bgr_normalize = transforms.Normalize(mean=[0.406, 0.456, 0.485],
+                                     std=[0.225, 0.224, 0.229])
         transform = transforms.Compose([
                     transforms.ToPILImage(),
+                    transforms.Resize(256),
+                    # transforms.CenterCrop(224),
                     transforms.ToTensor(),
-                    # bgr_normalize,
+                    bgr_normalize,
                 ])
-        enlarge_bbox = 2.0
+
         if input_path.endswith('.yaml'):
             dataset = CropClassTSVDatasetYaml(input_path, session_name='test',
                                               transform=transform,
-                                              enlarge_bbox=enlarge_bbox)
-        elif input_path.endswith('.yamllst'):
-            dataset = CropClassTSVDatasetYamlList(input_path, session_name='test',
-                                                  transform=transform,
-                                                  enlarge_bbox=enlarge_bbox)
+                                              enlarge_bbox=self.enlarge_bbox)
         else:
             raise NotImplementedError()
 
@@ -335,58 +346,63 @@ class FeatureExtractor():
             # bar = Bar('[{}]{}'.format(self.mode.upper(), self.title), max=len(self.dataloader))
             assert self.mode.lower() in ['delf']
             feature_maps = []
-            for batch_idx, (inputs, fileinfos) in enumerate(self.dataloader):
-                filename = json.dumps(fileinfos)
-                # image size upper limit.
-                if not (len(inputs.size()) == 4):
-                    if __DEBUG__:
-                        print('wrong input dimenstion! ({},{})'.format(filename, input.size()))
-                    continue;
-                if not (inputs.size(2)*inputs.size(3) <= 1200*1200):
-                    if __DEBUG__:
-                        print('passed: image size too large! ({},{})'.format(filename, inputs.size()))
-                    continue;
-                if not (inputs.size(2) >= 112 and inputs.size(3) >= 112):
-                    if __DEBUG__:
-                        print('passed: image size too small! ({},{})'.format(filename, inputs.size()))
-                    continue;
-
-                data_timer.update(time.time() - since)
-                # prepare inputs
-                if __is_cuda__():
-                    inputs = __cuda__(inputs)
-                inputs = __to_var__(inputs)
-
-                # get delf everything (score, feature, etc.)
-                delf_feature = self.__extract_delf_feature__(inputs.data, filename, mode='delf')
-                if delf_feature is not None:
-                    feature_maps.append(delf_feature)
-
-                # log.
-                batch_timer.update(time.time() - since)
+            def gen_rows():
                 since = time.time()
-                log_msg  = ('\n[Extract][Processing:({batch}/{size})] '+ \
-                            'eta: (data:{data:.3f}s),(batch:{bt:.3f}s)') \
-                .format(
-                    batch=batch_idx + 1,
-                    size=len(self.dataloader),
-                    data=data_timer.val,
-                    bt=batch_timer.val)
-                    # tt=bar.elapsed_td)
-                print(log_msg)
-                # bar.next()
+                for batch_idx, (inputs, fileinfos) in enumerate(self.dataloader):
+                    filename = json.dumps(fileinfos)
+                    # image size upper limit.
+                    if not (len(inputs.size()) == 4):
+                        # if __DEBUG__:
+                        print('wrong input dimenstion! ({},{})'.format(filename, inputs.size()))
+                        continue;
+                    if not (inputs.size(2)*inputs.size(3) <= 1200*1200):
+                        # if __DEBUG__:
+                        print('passed: image size too large! ({},{})'.format(filename, inputs.size()))
+                        continue;
+                    if not (inputs.size(2) >= 10 and inputs.size(3) >= 10):
+                        # if __DEBUG__:
+                        print('passed: image size too small! ({},{})'.format(filename, inputs.size()))
+                        continue;
 
-                # free GPU cache every.
-                if batch_idx % 10 == 0:
-                    torch.cuda.empty_cache()
-                    if __DEBUG__:
-                        print('GPU Memory flushed !!!!!!!!!')
+                    data_timer.update(time.time() - since)
+                    # prepare inputs
+                    if __is_cuda__():
+                        inputs = __cuda__(inputs)
+                    # inputs = __to_var__(inputs)
+
+                    # get delf everything (score, feature, etc.)
+                    # delf_feature = self.__extract_delf_feature__(inputs.data, filename, mode='delf')
+                    delf_feature = self.__extract_delf_feature__(inputs.detach(), filename, mode='delf')
+                    if delf_feature is not None:
+                        # feature_maps.append(delf_feature)
+                        yield [self.delf_features2str(delf_feature)]
+
+                    # log.
+                    batch_timer.update(time.time() - since)
+                    since = time.time()
+                    log_msg  = ('\n[Extract][Processing:({batch}/{size})] '+ \
+                                'eta: (data:{data:.3f}s),(batch:{bt:.3f}s)') \
+                    .format(
+                        batch=batch_idx + 1,
+                        size=len(self.dataloader),
+                        data=data_timer.val,
+                        bt=batch_timer.val)
+                        # tt=bar.elapsed_td)
+                    print(log_msg)
+                    # bar.next()
+
+                    # free GPU cache every.
+                    if batch_idx % 10 == 0:
+                        torch.cuda.empty_cache()
+                        if __DEBUG__:
+                            print('GPU Memory flushed !!!!!!!!!')
 
             # use pickle to save DeLF features.
-            self.__save_delf_features_to_file__(feature_maps, output_path)
+            # self.__save_delf_features_to_file__(feature_maps, output_path)
+            tsv_writer(gen_rows(), output_path)
 
 
-def main(MODE, model_name, arch, target_layer, input_path, output_path):
+def main(MODE, model_name, arch, target_layer, input_path, output_path, enlarge_bbox):
     # MODE = 'delf'           # either "delf" or "pca"
     # MODE = 'pca'
     # GPU_ID = 0
@@ -420,6 +436,8 @@ def main(MODE, model_name, arch, target_layer, input_path, output_path):
         'ARCH': arch,
         'EXPR': model_name,
         'TARGET_LAYER': target_layer,
+
+        'ENLARGE_BBOX': enlarge_bbox,
     }
 
 
@@ -429,6 +447,8 @@ def main(MODE, model_name, arch, target_layer, input_path, output_path):
 
     elif MODE.lower() in ['delf']:
         # query
+        if os.path.isfile(output_path):
+            raise ValueError("already exists: {}".format(output_path))
         mkdir_p(os.path.dirname(output_path))
         extractor.extract(input_path, output_path)
         # index

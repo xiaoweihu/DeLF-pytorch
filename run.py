@@ -1,5 +1,8 @@
 import base64
-import cPickle
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
 import json
 import matplotlib.pyplot as plt
 import os.path as op
@@ -13,9 +16,17 @@ from qd import tsv_io, qd_common
 
 FEA_NAME_KEY = "filename"
 
-def load_fea(fpath):
-    with open(fpath, 'rb') as fp:
-        return cPickle.load(fp)
+class DelfFeatureFile(tsv_io.TSVFile):
+    def seek(self, idx):
+        self._ensure_tsv_opened()
+        self._ensure_lineidx_loaded()
+        try:
+            pos = self._lineidx[idx]
+        except:
+            raise
+        self._fp.seek(pos)
+        return pickle.loads(base64.b64decode(self._fp.readline()))
+
 
 def get_bbox_from_fea(fea):
     # fea["filename"] is a tuple (imgkey, bbox)
@@ -39,23 +50,66 @@ def save_img_bytes(img_bytes, fpath):
     with open(fpath, 'wb') as fp:
         fp.write(img_bytes)
 
-def evaluate(index_fea_file, query_fea_file, pred_file,
-        topk=(1, 5), cal_acc=False,
-        visualize_dir=None, index_dataset_name=None, index_split="test", query_dataset_name=None, query_split="test", enlarge_bbox_factor=2.0):
+def evaluate(index_fea_file, query_fea_file, outfile,
+        topk=(1, 5), visualize_dir=None,
+        index_dataset_name=None, index_split="test", query_dataset_name=None, query_split="test", enlarge_bbox_factor=2.0):
 
-    all_index_fea = load_fea(index_fea_file)
-    all_query_fea = load_fea(query_fea_file)
+    all_index_fea = DelfFeatureFile(index_fea_file)
+    all_query_fea = DelfFeatureFile(query_fea_file)
     max_k = max(topk)
 
-    if index_dataset_name and query_dataset_name:
+    if op.isfile(outfile):
+        raise ValueError("already exists: {}".format(outfile))
+    from pathos.multiprocessing import ProcessPool as Pool
+    num_worker = 16
+    num_tasks = num_worker * 3
+    num_rows = len(all_query_fea)
+    num_rows_per_task = (num_rows + num_tasks - 1) // num_tasks
+    all_args = []
+    tmp_outs = []
+    for i in range(num_tasks):
+        cur_idx_start = i*num_rows_per_task
+        if cur_idx_start >= num_rows:
+            break
+        cur_idx_end = min(cur_idx_start+num_rows_per_task, num_rows)
+        if cur_idx_end > cur_idx_start:
+            cur_outfile = outfile + "{}.{}".format(i, num_tasks)
+            tmp_outs.append(cur_outfile)
+            all_args.append((range(cur_idx_start, cur_idx_end), all_query_fea, all_index_fea, cur_outfile, max_k))
+
+    # _delf_feature_match(all_args[0])
+    m = Pool(num_worker)
+    m.map(_delf_feature_match, all_args)
+    m.close()
+    qd_common.concat_files(tmp_outs, outfile)
+    for fpath in tmp_outs:
+        tsv_io.rm_tsv(fpath)
+
+    if visualize_dir:
         index_dataset = tsv_io.TSVDataset(index_dataset_name)
         query_dataset = tsv_io.TSVDataset(query_dataset_name)
+        for i, parts in enumerate(tsv_io.tsv_reader(outfile)):
+            if i >= 50:
+                break
+            query_fea_idx = int(parts[0])
+            pred_labels = json.loads(parts[2])
+            matched_fea_idx = pred_labels[0][2]
+            visualize_feature_matching(query_fea_idx, matched_fea_idx, all_query_fea, all_index_fea, visualize_dir,
+                    query_dataset, index_dataset, enlarge_bbox_factor)
 
-    correct_counts = [0] * max_k
+    return calculate_accuracy_for_matching(outfile, topk)
+
+
+def _delf_feature_match(args):
+    query_fea_rows, all_query_fea, all_index_fea, outfile, max_k = args
+
     def gen_rows():
-        for query_idx, query_fea in enumerate(all_query_fea):
+        for query_idx in query_fea_rows:
+            print(query_idx)
+            query_fea = all_query_fea[query_idx]
             scores = []
-            for i, index_fea in enumerate(all_index_fea):
+            for i in range(len(all_index_fea)):
+                index_fea = all_index_fea[i]
                 inliers, locations_1_to_use, locations_2_to_use = matcher.get_inliers(
                         query_fea['location_np_list'],
                         query_fea['descriptor_np_list'],
@@ -66,65 +120,67 @@ def evaluate(index_fea_file, query_fea_file, pred_file,
                 else:
                     score = 0
                 scores.append((i, score))
-
             scores = sorted(scores, key=lambda t: t[1], reverse=True)
             # use top1 matching image
             pred_labels = []
-            for i, (fea_idx, score) in enumerate(scores):
+            for i, (matched_fea_idx, score) in enumerate(scores):
                 if i >= max_k:
                     break
-                cur_pred = get_bbox_from_fea(all_index_fea[fea_idx])["class"]
-                pred_labels.append((cur_pred, score))
+                cur_pred = get_bbox_from_fea(all_index_fea[matched_fea_idx])["class"]
+                pred_labels.append([cur_pred, score, matched_fea_idx])
 
             query_bbox = get_bbox_from_fea(query_fea)
-            query_imgkey = get_key_from_fea(query_fea)
+            yield str(query_idx), qd_common.json_dump(query_bbox), qd_common.json_dump(pred_labels)
 
-            if cal_acc:
-                gt_label = query_bbox["class"]
-                for i in range(max_k):
-                    cur_pred = pred_labels[i][0]
-                    if cur_pred == gt_label:
-                        correct_counts[i] += 1
-                        break
+    tsv_io.tsv_writer(gen_rows(), outfile)
 
-            if visualize_dir and query_idx<50:
-                matched_fea = all_index_fea[scores[0][0]]
-                matched_imgkey = get_key_from_fea(matched_fea)
-                matched_bbox = get_bbox_from_fea(matched_fea)
-                matched_img_arr = key_to_img_arr(index_dataset, index_split, matched_imgkey,
-                        bbox=matched_bbox, enlarge=enlarge_bbox_factor)
-                query_img_arr = key_to_img_arr(query_dataset, query_split, query_imgkey,
-                        bbox=query_bbox, enlarge=enlarge_bbox_factor)
-                try:
-                    side_by_side_comp_img_byte, score = matcher.get_ransac_image_byte(
-                            query_img_arr,
-                            query_fea['location_np_list'],
-                            query_fea['descriptor_np_list'],
-                            matched_img_arr,
-                            matched_fea['location_np_list'],
-                            matched_fea['descriptor_np_list'])
-                except:
-                    continue
-                query_att = matcher.get_attention_image_byte(query_fea['attention_np_list'])
-                matched_att = matcher.get_attention_image_byte(matched_fea['attention_np_list'])
-                save_img_bytes(side_by_side_comp_img_byte, op.join(visualize_dir, "{}_matchscore{}.jpg".format(query_idx, score)))
-                save_img_bytes(query_att, op.join(visualize_dir, "{}att_{}.jpg".format(query_idx, query_imgkey)))
-                save_img_bytes(matched_att, op.join(visualize_dir, "{}att_{}.jpg".format(query_idx, matched_imgkey)))
+def calculate_accuracy_for_matching(match_res_file, topk_acc):
+    max_k = max(topk_acc)
+    correct_counts = [0] * max_k
+    num_total = 0
+    for parts in tsv_io.tsv_reader(match_res_file):
+        num_total += 1
+        query_bbox = json.loads(parts[1])
+        pred_labels = json.loads(parts[2])
+        gt_label = query_bbox["class"]
+        for i in range(min(max_k, len(pred_labels))):
+            cur_pred = pred_labels[i][0]
+            if cur_pred == gt_label:
+                correct_counts[i] += 1
+                break
 
-            yield query_imgkey, json.dumps(query_bbox), ';'.join([':'.join([it1, str(it2)]) for it1, it2 in pred_labels])
-
-    tsv_io.tsv_writer(gen_rows(), pred_file)
     for i in range(1, len(correct_counts)):
         correct_counts[i] += correct_counts[i-1]
-    return [c / float(len(all_query_fea)) for c in correct_counts]
+    return [c / float(num_total) for c in correct_counts]
 
-def parse_matching_res(match_file, pred_file, topk_acc=None):
-    if topk_acc:
-        correct_counts = [0] * max(topk_acc)
-    for parts in tsv_io.tsv_reader(match_file):
-        key = parts[0]
-        query_bbox = json.loads(parts[1])
-        pred_labels = parts[2].split(';')
+def visualize_feature_matching(query_fea_idx, index_fea_idx, all_query_fea, all_index_fea, outdir,
+            query_dataset, index_dataset, enlarge_bbox_factor):
+    query_fea = all_query_fea[query_fea_idx]
+    index_fea = all_index_fea[index_fea_idx]
+    matched_imgkey = get_key_from_fea(index_fea)
+    matched_bbox = get_bbox_from_fea(index_fea)
+    matched_img_arr = key_to_img_arr(index_dataset, index_split, matched_imgkey,
+            bbox=matched_bbox, enlarge=enlarge_bbox_factor)
+    query_imgkey = get_key_from_fea(query_fea)
+    query_bbox = get_bbox_from_fea(query_fea)
+    query_img_arr = key_to_img_arr(query_dataset, query_split, query_imgkey,
+            bbox=query_bbox, enlarge=enlarge_bbox_factor)
+    try:
+        side_by_side_comp_img_byte, score = matcher.get_ransac_image_byte(
+                query_img_arr,
+                query_fea['location_np_list'],
+                query_fea['descriptor_np_list'],
+                matched_img_arr,
+                index_fea['location_np_list'],
+                index_fea['descriptor_np_list'])
+    except Exception as e:
+        print("fail to visualize: " + str(e))
+        pass
+    query_att = matcher.get_attention_image_byte(query_fea['attention_np_list'])
+    matched_att = matcher.get_attention_image_byte(index_fea['attention_np_list'])
+    save_img_bytes(side_by_side_comp_img_byte, op.join(outdir, "{}_matchscore{}.jpg".format(query_fea_idx, score)))
+    save_img_bytes(query_att, op.join(outdir, "{}att_{}.jpg".format(query_fea_idx, query_imgkey)))
+    save_img_bytes(matched_att, op.join(outdir, "{}att_{}.jpg".format(query_fea_idx, matched_imgkey)))
 
 
 if __name__ == "__main__":
@@ -132,24 +188,39 @@ if __name__ == "__main__":
 
     # model_name = config.expr
     model_name = "delf_brandsports_bneval"
-    query_data_cfg = "data/brand_output/configs/logo40.yaml"
-    query_fea_file = 'output/{}/delf.batch/logo40_query.delf'.format(model_name)
-    index_data_cfg = "data/brand_output/configs/logo40can2.yaml"
-    index_fea_file = 'output/{}/delf.batch/logo40_index.delf'.format(model_name)
+    query_dataset_name = "logo200"
+    query_split = "test"
+    index_dataset_name = "logo200"
+    index_split = "train"
+    enlarge_bbox_factor = 1.0
+    # query_data_cfg = "data/brand_output/configs/logo40.yaml"
+    query_data_cfg = "aux_data/{}_real.yaml".format(query_dataset_name)
+    query_fea_file = 'output/{}/delf.batch/{}.{}.{}.query.delf'.format(model_name, query_dataset_name, query_split, enlarge_bbox_factor)
+    # index_data_cfg = "data/brand_output/configs/logo40can2.yaml"
+    index_data_cfg = "aux_data/{}_cano.yaml".format(index_dataset_name)
+    index_fea_file = 'output/{}/delf.batch/{}.{}.{}.index.delf'.format(model_name, index_dataset_name, index_split, enlarge_bbox_factor)
 
-    # import shutil
-    # shutil.copyfile('output/{}/keypoint/ckpt/bestshot.pth.tar'.format(model_name), 'output/{}/keypoint/ckpt/fix.pth.tar'.format(model_name))
+    # train PCA
+    # model_path = 'output/{}/keypoint/ckpt/fix.pth.tar'.format(model_name)
+    # if not op.isfile(model_path):
+    #     import shutil
+    #     shutil.copyfile('output/{}/keypoint/ckpt/bestshot.pth.tar'.format(model_name), model_path)
     # qd_delf.extract.extractor.main("pca", model_name, config.arch, config.target_layer, "", "")
 
-    query_pred_file = 'output/{}/logo40_delf_query.tsv'.format(model_name)
-    # qd_delf.extract.extractor.main("delf", model_name, config.arch, config.target_layer, query_data_cfg, query_fea_file)
-    # qd_delf.extract.extractor.main("delf", model_name, config.arch, config.target_layer, index_data_cfg, index_fea_file)
+    # extract DeLF features
+    # qd_delf.extract.extractor.main("delf", model_name, config.arch, config.target_layer,
+    #         query_data_cfg, query_fea_file, enlarge_bbox_factor)
+    # qd_delf.extract.extractor.main("delf", model_name, config.arch, config.target_layer,
+    #         index_data_cfg, index_fea_file, enlarge_bbox_factor)
 
-    visualize_dir = "output/{}/visual/".format(model_name)
+    query_pred_file = 'output/{}/delf_query_{}_to_{}.tsv'.format(model_name, op.basename(query_fea_file), op.basename(index_fea_file))
+    visualize_dir = "output/{}/visual_{}/".format(model_name, op.basename(query_pred_file))
     qd_common.ensure_directory(visualize_dir)
-    accuracy = evaluate(index_fea_file, query_fea_file, query_pred_file, cal_acc=True,
-        visualize_dir=visualize_dir, index_dataset_name="logo40can2", index_split="train",
-        query_dataset_name="logo40", query_split="test", enlarge_bbox_factor=2.0)
+    accuracy = evaluate(index_fea_file, query_fea_file, query_pred_file,
+        visualize_dir=visualize_dir, index_dataset_name=index_dataset_name, index_split=index_split,
+        query_dataset_name=query_dataset_name, query_split=query_split, enlarge_bbox_factor=enlarge_bbox_factor)
     print(accuracy)
-    with open('output/{}/logo40_delf_acc.tsv'.format(model_name), 'a') as fp:
-        fp.write('\t'.join([str(i) for i in accuracy]))
+    with open('output/{}/delf_acc.tsv'.format(model_name), 'a') as fp:
+        fp.write('\t'.join(
+            [query_pred_file] \
+            + [str(i) for i in accuracy]))

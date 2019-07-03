@@ -1,0 +1,4 @@
+test:
+  tsv: data/logo200/train.tsv
+  label: data/logo200/train.label.tsv
+  labelmap: data/logo200/test.labelmap.tsv

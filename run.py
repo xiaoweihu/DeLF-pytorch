@@ -25,7 +25,8 @@ class DelfFeatureFile(tsv_io.TSVFile):
         except:
             raise
         self._fp.seek(pos)
-        return pickle.loads(base64.b64decode(self._fp.readline()))
+        ret = pickle.loads(base64.b64decode(self._fp.readline()))
+        return ret
 
 
 def get_bbox_from_fea(fea):
@@ -54,7 +55,9 @@ def evaluate(index_fea_file, query_fea_file, outfile,
         topk=(1, 5), visualize_dir=None,
         index_dataset_name=None, index_split="test", query_dataset_name=None, query_split="test", enlarge_bbox_factor=2.0):
 
-    all_index_fea = DelfFeatureFile(index_fea_file)
+    # all_index_fea = DelfFeatureFile(index_fea_file)
+    index_fea_tsv = DelfFeatureFile(index_fea_file)
+    all_index_fea = {i: index_fea_tsv[i] for i in range(len(index_fea_tsv))}
     all_query_fea = DelfFeatureFile(query_fea_file)
     max_k = max(topk)
 
@@ -77,13 +80,14 @@ def evaluate(index_fea_file, query_fea_file, outfile,
             tmp_outs.append(cur_outfile)
             all_args.append((range(cur_idx_start, cur_idx_end), all_query_fea, all_index_fea, cur_outfile, max_k))
 
+    # NOTE: feature matching takes a lot of time
     # _delf_feature_match(all_args[0])
-    m = Pool(num_worker)
-    m.map(_delf_feature_match, all_args)
-    m.close()
-    qd_common.concat_files(tmp_outs, outfile)
-    for fpath in tmp_outs:
-        tsv_io.rm_tsv(fpath)
+    # m = Pool(num_worker)
+    # m.map(_delf_feature_match, all_args)
+    # m.close()
+    qd_common.concat_files([f for f in tmp_outs if op.isfile(f)], outfile)
+    # for fpath in tmp_outs:
+    #     tsv_io.rm_tsv(fpath)
 
     if visualize_dir:
         index_dataset = tsv_io.TSVDataset(index_dataset_name)
@@ -103,34 +107,49 @@ def evaluate(index_fea_file, query_fea_file, outfile,
 def _delf_feature_match(args):
     query_fea_rows, all_query_fea, all_index_fea, outfile, max_k = args
 
+    # resume from last checkpoint
+    last_cache = {}
+    if op.isfile(outfile):
+        for parts in tsv_io.tsv_reader(outfile):
+            if len(parts) == 3:
+                try:
+                    json.loads(parts[1])
+                    json.loads(parts[2])
+                except Exception as e:
+                    continue
+                last_cache[int(parts[0])] = parts
+
     def gen_rows():
         for query_idx in query_fea_rows:
             print(query_idx)
-            query_fea = all_query_fea[query_idx]
-            scores = []
-            for i in range(len(all_index_fea)):
-                index_fea = all_index_fea[i]
-                inliers, locations_1_to_use, locations_2_to_use = matcher.get_inliers(
-                        query_fea['location_np_list'],
-                        query_fea['descriptor_np_list'],
-                        index_fea['location_np_list'],
-                        index_fea['descriptor_np_list'])
-                if inliers is not None:
-                    score = sum(inliers)
-                else:
-                    score = 0
-                scores.append((i, score))
-            scores = sorted(scores, key=lambda t: t[1], reverse=True)
-            # use top1 matching image
-            pred_labels = []
-            for i, (matched_fea_idx, score) in enumerate(scores):
-                if i >= max_k:
-                    break
-                cur_pred = get_bbox_from_fea(all_index_fea[matched_fea_idx])["class"]
-                pred_labels.append([cur_pred, score, matched_fea_idx])
+            if query_idx in last_cache:
+                yield last_cache[query_idx]
+            else:
+                query_fea = all_query_fea[query_idx]
+                scores = []
+                for i in range(len(all_index_fea)):
+                    index_fea = all_index_fea[i]
+                    inliers, locations_1_to_use, locations_2_to_use = matcher.get_inliers(
+                            query_fea['location_np_list'],
+                            query_fea['descriptor_np_list'],
+                            index_fea['location_np_list'],
+                            index_fea['descriptor_np_list'])
+                    if inliers is not None:
+                        score = sum(inliers)
+                    else:
+                        score = 0
+                    scores.append((i, score))
+                scores = sorted(scores, key=lambda t: t[1], reverse=True)
+                # use top1 matching image
+                pred_labels = []
+                for i, (matched_fea_idx, score) in enumerate(scores):
+                    if i >= max_k:
+                        break
+                    cur_pred = get_bbox_from_fea(all_index_fea[matched_fea_idx])["class"]
+                    pred_labels.append([cur_pred, score, matched_fea_idx])
 
-            query_bbox = get_bbox_from_fea(query_fea)
-            yield str(query_idx), qd_common.json_dump(query_bbox), qd_common.json_dump(pred_labels)
+                query_bbox = get_bbox_from_fea(query_fea)
+                yield str(query_idx), qd_common.json_dump(query_bbox), qd_common.json_dump(pred_labels)
 
     tsv_io.tsv_writer(gen_rows(), outfile)
 

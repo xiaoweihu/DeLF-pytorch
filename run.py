@@ -81,13 +81,13 @@ def evaluate(index_fea_file, query_fea_file, outfile,
             all_args.append((range(cur_idx_start, cur_idx_end), all_query_fea, all_index_fea, cur_outfile, max_k))
 
     # NOTE: feature matching takes a lot of time
-    # _delf_feature_match(all_args[0])
-    # m = Pool(num_worker)
-    # m.map(_delf_feature_match, all_args)
-    # m.close()
+    _delf_feature_match(all_args[0])
+    m = Pool(num_worker)
+    m.map(_delf_feature_match, all_args)
+    m.close()
     qd_common.concat_files([f for f in tmp_outs if op.isfile(f)], outfile)
-    # for fpath in tmp_outs:
-    #     tsv_io.rm_tsv(fpath)
+    for fpath in tmp_outs:
+        tsv_io.rm_tsv(fpath)
 
     if visualize_dir:
         index_dataset = tsv_io.TSVDataset(index_dataset_name)
@@ -109,15 +109,17 @@ def _delf_feature_match(args):
 
     # resume from last checkpoint
     last_cache = {}
-    if op.isfile(outfile):
-        for parts in tsv_io.tsv_reader(outfile):
-            if len(parts) == 3:
-                try:
-                    json.loads(parts[1])
-                    json.loads(parts[2])
-                except Exception as e:
-                    continue
-                last_cache[int(parts[0])] = parts
+    checkpoints = [outfile + ".tmp", outfile]
+    for cache_file in checkpoints:
+        if op.isfile(cache_file):
+            for parts in tsv_io.tsv_reader(cache_file):
+                if len(parts) == 3:
+                    try:
+                        json.loads(parts[1])
+                        json.loads(parts[2])
+                    except Exception:
+                        continue
+                    last_cache[int(parts[0])] = parts
 
     def gen_rows():
         for query_idx in query_fea_rows:
@@ -227,6 +229,10 @@ if __name__ == "__main__":
     # qd_delf.extract.extractor.main("pca", model_name, config.arch, config.target_layer, "", "")
 
     # extract DeLF features
+    # if op.isfile(query_fea_file):
+    #     raise Exception("already exist: {}".format(query_fea_file))
+    # if op.isfile(index_fea_file):
+    #     raise Exception("already exist: {}".format(index_fea_file))
     # qd_delf.extract.extractor.main("delf", model_name, config.arch, config.target_layer,
     #         query_data_cfg, query_fea_file, enlarge_bbox_factor)
     # qd_delf.extract.extractor.main("delf", model_name, config.arch, config.target_layer,

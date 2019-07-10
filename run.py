@@ -12,7 +12,9 @@ import qd_delf.train.main
 from qd_delf.train.config import config
 import qd_delf.extract.extractor
 from qd_delf.helper import matcher
+
 from qd import tsv_io, qd_common
+from qd.deteval import deteval
 
 FEA_NAME_KEY = "filename"
 
@@ -61,8 +63,8 @@ def evaluate(index_fea_file, query_fea_file, outfile,
     all_query_fea = DelfFeatureFile(query_fea_file)
     max_k = max(topk)
 
-    if op.isfile(outfile):
-        raise ValueError("already exists: {}".format(outfile))
+    # if op.isfile(outfile):
+    #     raise ValueError("already exists: {}".format(outfile))
     from pathos.multiprocessing import ProcessPool as Pool
     num_worker = 16
     num_tasks = num_worker * 3
@@ -81,25 +83,26 @@ def evaluate(index_fea_file, query_fea_file, outfile,
             all_args.append((range(cur_idx_start, cur_idx_end), all_query_fea, all_index_fea, cur_outfile, max_k))
 
     # NOTE: feature matching takes a lot of time
-    _delf_feature_match(all_args[0])
-    m = Pool(num_worker)
-    m.map(_delf_feature_match, all_args)
-    m.close()
-    qd_common.concat_files([f for f in tmp_outs if op.isfile(f)], outfile)
-    for fpath in tmp_outs:
-        tsv_io.rm_tsv(fpath)
+    # _delf_feature_match(all_args[0])
+    # m = Pool(num_worker)
+    # m.map(_delf_feature_match, all_args)
+    # m.close()
+    # qd_common.concat_files([f for f in tmp_outs if op.isfile(f)], outfile)
+    # for fpath in tmp_outs:
+    #     tsv_io.rm_tsv(fpath)
+    qd_common.concat_files([f+".tmp" for f in tmp_outs if op.isfile(f+".tmp")], outfile)
 
-    if visualize_dir:
-        index_dataset = tsv_io.TSVDataset(index_dataset_name)
-        query_dataset = tsv_io.TSVDataset(query_dataset_name)
-        for i, parts in enumerate(tsv_io.tsv_reader(outfile)):
-            if i >= 50:
-                break
-            query_fea_idx = int(parts[0])
-            pred_labels = json.loads(parts[2])
-            matched_fea_idx = pred_labels[0][2]
-            visualize_feature_matching(query_fea_idx, matched_fea_idx, all_query_fea, all_index_fea, visualize_dir,
-                    query_dataset, index_dataset, enlarge_bbox_factor)
+    # if visualize_dir:
+    #     index_dataset = tsv_io.TSVDataset(index_dataset_name)
+    #     query_dataset = tsv_io.TSVDataset(query_dataset_name)
+    #     for i, parts in enumerate(tsv_io.tsv_reader(outfile)):
+    #         if i >= 50:
+    #             break
+    #         query_fea_idx = int(parts[0])
+    #         pred_labels = json.loads(parts[2])
+    #         matched_fea_idx = pred_labels[0][2]
+    #         visualize_feature_matching(query_fea_idx, matched_fea_idx, all_query_fea, all_index_fea, visualize_dir,
+    #                 query_dataset, index_dataset, enlarge_bbox_factor)
 
     return calculate_accuracy_for_matching(outfile, topk)
 
@@ -159,10 +162,18 @@ def calculate_accuracy_for_matching(match_res_file, topk_acc):
     max_k = max(topk_acc)
     correct_counts = [0] * max_k
     num_total = 0
+    all_gt = []
+    all_pred = []
     for parts in tsv_io.tsv_reader(match_res_file):
         num_total += 1
+        query_fea_idx = parts[0]
         query_bbox = json.loads(parts[1])
         pred_labels = json.loads(parts[2])
+        # calculate mAP
+        all_gt.append([query_fea_idx, qd_common.json_dump([query_bbox])])
+        all_pred.append([query_fea_idx, qd_common.json_dump(
+                [{"class": pred_labels[0][0], "conf": pred_labels[0][1]/1000.0, "rect": query_bbox["rect"]}])])
+        # calculate top k accuracy
         gt_label = query_bbox["class"]
         for i in range(min(max_k, len(pred_labels))):
             cur_pred = pred_labels[i][0]
@@ -170,8 +181,16 @@ def calculate_accuracy_for_matching(match_res_file, topk_acc):
                 correct_counts[i] += 1
                 break
 
+    map_report = match_res_file + ".eval.map"
+    pred_file = match_res_file + ".pred"
+    gt_file = match_res_file + ".gt"
+    tsv_io.tsv_writer(all_pred, pred_file)
+    tsv_io.tsv_writer(all_gt, gt_file)
+    deteval(truth=gt_file, dets=pred_file, report_file=map_report)
+
     for i in range(1, len(correct_counts)):
         correct_counts[i] += correct_counts[i-1]
+
     return [c / float(num_total) for c in correct_counts]
 
 def visualize_feature_matching(query_fea_idx, index_fea_idx, all_query_fea, all_index_fea, outdir,
@@ -213,7 +232,7 @@ if __name__ == "__main__":
     query_split = "test"
     index_dataset_name = "logo200"
     index_split = "train"
-    enlarge_bbox_factor = 1.0
+    enlarge_bbox_factor = 2.0
     # query_data_cfg = "data/brand_output/configs/logo40.yaml"
     query_data_cfg = "aux_data/{}_real.yaml".format(query_dataset_name)
     query_fea_file = 'output/{}/delf.batch/{}.{}.{}.query.delf'.format(model_name, query_dataset_name, query_split, enlarge_bbox_factor)
@@ -249,3 +268,4 @@ if __name__ == "__main__":
         fp.write('\t'.join(
             [query_pred_file] \
             + [str(i) for i in accuracy]))
+        fp.write('\n')

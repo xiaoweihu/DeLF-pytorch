@@ -61,31 +61,32 @@ def evaluate(index_fea_file, query_fea_file, outfile,
     all_query_fea = DelfFeatureFile(query_fea_file)
     max_k = max(topk)
 
-    if op.isfile(outfile):
-        raise ValueError("already exists: {}".format(outfile))
-    from pathos.multiprocessing import ProcessPool as Pool
-    num_worker = 16
-    num_tasks = num_worker * 3
-    num_rows = len(all_query_fea)
-    num_rows_per_task = (num_rows + num_tasks - 1) // num_tasks
-    all_args = []
-    tmp_outs = []
-    for i in range(num_tasks):
-        cur_idx_start = i*num_rows_per_task
-        if cur_idx_start >= num_rows:
-            break
-        cur_idx_end = min(cur_idx_start+num_rows_per_task, num_rows)
-        if cur_idx_end > cur_idx_start:
-            cur_outfile = outfile + "{}.{}".format(i, num_tasks)
-            tmp_outs.append(cur_outfile)
-            all_args.append((range(cur_idx_start, cur_idx_end), all_query_fea, all_index_fea, cur_outfile, max_k))
-
+#    if op.isfile(outfile):
+#        raise ValueError("already exists: {}".format(outfile))
+#    from pathos.multiprocessing import ProcessPool as Pool
+#    num_worker = 16
+#    num_tasks = num_worker * 3
+#    num_rows = len(all_query_fea)
+#    num_rows_per_task = (num_rows + num_tasks - 1) // num_tasks
+#    all_args = []
+#    tmp_outs = []
+#    for i in range(num_tasks):
+#        cur_idx_start = i*num_rows_per_task
+#        if cur_idx_start >= num_rows:
+#            break
+#        cur_idx_end = min(cur_idx_start+num_rows_per_task, num_rows)
+#        if cur_idx_end > cur_idx_start:
+#            cur_outfile = outfile + "{}.{}".format(i, num_tasks)
+#            tmp_outs.append(cur_outfile)
+#            all_args.append((range(cur_idx_start, cur_idx_end), all_query_fea, all_index_fea, cur_outfile, max_k))
+#
     # NOTE: feature matching takes a lot of time
     # _delf_feature_match(all_args[0])
     # m = Pool(num_worker)
     # m.map(_delf_feature_match, all_args)
     # m.close()
-    qd_common.concat_files([f for f in tmp_outs if op.isfile(f)], outfile)
+    # import ipdb;ipdb.set_trace()
+    # qd_common.concat_files([f + ".tmp" for f in tmp_outs if op.isfile(f+".tmp")], outfile)
     # for fpath in tmp_outs:
     #     tsv_io.rm_tsv(fpath)
 
